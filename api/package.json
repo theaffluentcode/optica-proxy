@@ -4,6 +4,6 @@
   "description": "CORS proxy for Optica Options Screener — routes Polygon.io API calls",
   "private": true,
   "engines": {
-    "node": "18.x"
+    "node": "24.x"
   }
 }
