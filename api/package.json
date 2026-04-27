@@ -1,0 +1,9 @@
+{
+  "name": "optica-proxy",
+  "version": "1.0.0",
+  "description": "CORS proxy for Optica Options Screener — routes Polygon.io API calls",
+  "private": true,
+  "engines": {
+    "node": "18.x"
+  }
+}
