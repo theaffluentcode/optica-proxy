@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>OPTICA — Live Options Screener</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #070b12; color: #e2e8f0; font-family: 'Courier New', monospace; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+// Proxy base — same domain, no CORS at all
+const BASE = "";
+
+async function poly(path, params = {}) {
+  const url = new URL(window.location.origin + "/api/polygon");
+  url.searchParams.set("path", path.replace(/^\//, ""));
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
+  const r = await fetch(url.toString());
+  const json = await r.json();
+  if (r.status === 403 || json?.status === "ERROR") throw new Error("FORBIDDEN");
+  if (r.status === 429) throw new Error("RATE_LIMITED");
+  if (!r.ok) throw new Error("HTTP_" + r.status);
+  return json;
+}
+
+const SECTORS = {
+  AAPL:"Tech",MSFT:"Tech",NVDA:"Semis",AMD:"Semis",GOOGL:"Tech",META:"Tech",
+  AMZN:"Consumer",TSLA:"EV",MU:"Semis",INTC:"Semis",AVGO:"Semis",QCOM:"Semis",
+  AMAT:"Semis",LRCX:"Semis",KLAC:"Semis",MRVL:"Semis",SMCI:"Tech",ARM:"Semis",
+  PLTR:"Tech",COIN:"Crypto",MARA:"Crypto",RIOT:"Crypto",HOOD:"Fintech",SOFI:"Fintech",
+  SQ:"Fintech",PYPL:"Fintech",NFLX:"Media",GS:"Finance",JPM:"Finance",BAC:"Finance",
+  XOM:"Energy",BABA:"Tech",NIO:"EV",RIVN:"EV",SPY:"ETF",QQQ:"ETF",IWM:"ETF",
+  LITE:"Photonics",CRWD:"Cyber",PANW:"Cyber",NET:"Cyber",SNOW:"Cloud",DDOG:"Cloud",
+  UBER:"Mobility",IONQ:"Quantum",SOUN:"AI",WMT:"Retail",BA:"Aerospace",
+};
+
+const TICKERS = ["NVDA","AMD","MU","TSLA","AAPL","MSFT","META","AMZN","COIN","PLTR",
+  "MARA","NFLX","JPM","GS","SOFI","HOOD","AVGO","SMCI","ARM","RIVN","QQQ","SPY",
+  "CRWD","PANW","SNOW","DDOG","LITE","INTC","QCOM","AMAT","LRCX","SQ","PYPL",
+  "BABA","NIO","IONQ","SOUN","WMT","BA","MRVL","KLAC","RIOT","IWM","GOOGL","UBER"];
+
+const fmt  = (n,d=2) => (n==null||isNaN(n))?"—":Number(n).toFixed(d);
+const fmtV = n => n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(0)+"K":String(n||0);
+const fmtP = n => (n==null||isNaN(n))?"—":`$${Number(n).toFixed(2)}`;
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+const expDate = days => { const d=new Date(); d.setDate(d.getDate()+days); if(d.getDay()===0)d.setDate(d.getDate()+1); if(d.getDay()===6)d.setDate(d.getDate()+2); return d.toISOString().split("T")[0]; };
+
+async function fetchOptions(ticker, days) {
+  try {
+    const d = await poly(`v3/snapshot/options/${ticker}`, {
+      "expiration_date.gte": expDate(1), "expiration_date.lte": expDate(days+4),
+      limit:60, sort:"open_interest", order:"desc",
+    });
+    const r=d.results||[]; if(!r.length) return null;
+    const calls=r.filter(o=>o.details?.contract_type==="call");
+    const puts=r.filter(o=>o.details?.contract_type==="put");
+    const cv=calls.reduce((s,o)=>s+(o.day?.volume||0),0);
+    const pv=puts.reduce((s,o)=>s+(o.day?.volume||0),0);
+    const top=[...calls].sort((a,b)=>(b.day?.volume||0)-(a.day?.volume||0))[0];
+    const uC=calls.filter(o=>(o.day?.volume||0)>Math.max((o.open_interest||1)*.3,100));
+    const uP=puts.filter(o=>(o.day?.volume||0)>Math.max((o.open_interest||1)*.3,100));
+    return { totalVol:cv+pv, callVol:cv, putVol:pv,
+      pcr:cv>0?+(pv/cv).toFixed(2):null,
+      iv:top?.implied_volatility?Math.round(top.implied_volatility*100):null,
+      delta:top?.greeks?.delta??null, theta:top?.greeks?.theta??null,
+      unusualCalls:uC.length, unusualPuts:uP.length,
+      instBias:uC.length>uP.length?"CALL":uP.length>uC.length?"PUT":null };
+  } catch { return null; }
+}
+
+async function aiAnalyze(stock, dteLabel) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      model:"claude-sonnet-4-20250514", max_tokens:400,
+      system:`Elite options analyst. Return ONLY raw JSON, no markdown.
+Schema: {"signal":"CALL","strategy":"Long Call","strike":195,"expiry":"May 2 (5 DTE)","targetPremium":1.45,"target5pct":1.52,"stopLoss":1.16,"profitProbability":58,"confidence":74,"catalyst":"reason with a number","grade":"A","riskReward":2.1}
+target5pct=targetPremium*1.05 exactly. stopLoss=targetPremium*0.80 exactly. signal=CALL or PUT only. grade A/B/C.`,
+      messages:[{role:"user",content:`LIVE: ${stock.ticker} $${stock.price} ${stock.change>0?"+":""}${fmt(stock.change)}% vol:${fmtV(stock.volume)} optVol:${stock.optVol?fmtV(stock.optVol):"N/A"} PCR:${stock.pcr??"N/A"} IV:${stock.iv?stock.iv+"%":"N/A"} instBias:${stock.instBias??"none"} DTE:${dteLabel}`}],
+    }),
+  });
+  const data=await res.json();
+  const raw=data.content?.find(b=>b.type==="text")?.text||"";
+  const match=raw.match(/\{[\s\S]*\}/);
+  if(!match) throw new Error("No JSON");
+  return JSON.parse(match[0]);
+}
+
+function App() {
+  const [stocks,setStocks]=React.useState([]);
+  const [loading,setLoading]=React.useState(false);
+  const [stage,setStage]=React.useState("");
+  const [pct,setPct]=React.useState(0);
+  const [log,setLog]=React.useState([]);
+  const [showLog,setShowLog]=React.useState(false);
+  const [afterHours,setAfterHours]=React.useState(false);
+  const [lastScan,setLastScan]=React.useState(null);
+  const [dte,setDte]=React.useState("7");
+  const [filter,setFilter]=React.useState("ALL");
+  const [sort,setSort]=React.useState("grade");
+  const [sel,setSel]=React.useState(null);
+  const [err,setErr]=React.useState("");
+  const abort=React.useRef(false);
+
+  const addLog=(msg,type="info")=>setLog(p=>[...p.slice(-80),{ts:new Date().toLocaleTimeString(),msg,type}]);
+
+  const runScan=React.useCallback(async(dteKey)=>{
+    setLoading(true);setStocks([]);setErr("");abort.current=false;
+    const days=dteKey==="5"?5:dteKey==="14"?14:7;
+    const dteLabel=dteKey==="5"?"2-5 Days":dteKey==="14"?"2 Weeks":"1 Week";
+
+    try {
+      setStage("Checking market…");setPct(5);
+      addLog("Checking market status…");
+      let isOpen=false;
+      try{const m=await poly("v1/marketstatus/now");isOpen=m?.market==="open";addLog(`Market: ${m?.market}`,isOpen?"ok":"warn");}
+      catch(e){addLog(`Market status: ${e.message}`,"warn");}
+      setAfterHours(!isOpen);
+
+      setStage("Fetching live snapshots…");setPct(12);
+      addLog(`Fetching ${TICKERS.length} tickers…`);
+      const b1=TICKERS.slice(0,25);const b2=TICKERS.slice(25);
+      let snaps=[];
+      try{const d=await poly("v2/snapshot/locale/us/markets/stocks/tickers",{tickers:b1.join(",")});snaps=[...snaps,...(d.tickers||[])];addLog(`Batch 1: ${d.tickers?.length||0} ✓`,"ok");}
+      catch(e){addLog(`Batch 1: ${e.message}`,"error");}
+      await sleep(300);
+      try{const d=await poly("v2/snapshot/locale/us/markets/stocks/tickers",{tickers:b2.join(",")});snaps=[...snaps,...(d.tickers||[])];addLog(`Batch 2: ${d.tickers?.length||0} ✓`,"ok");}
+      catch(e){addLog(`Batch 2: ${e.message}`,"warn");}
+
+      if(isOpen){
+        try{const g=await poly("v2/snapshot/locale/us/markets/stocks/gainers",{include_otc:"false"});const gl=g.tickers||[];addLog(`Gainers: ${gl.length} ✓`,"ok");gl.forEach(t=>{if(!snaps.find(s=>s.ticker===t.ticker))snaps.push(t);});}catch(e){addLog(`Gainers: ${e.message}`,"warn");}
+        await sleep(250);
+        try{const l=await poly("v2/snapshot/locale/us/markets/stocks/losers",{include_otc:"false"});const ll=l.tickers||[];addLog(`Losers: ${ll.length} ✓`,"ok");ll.forEach(t=>{if(!snaps.find(s=>s.ticker===t.ticker))snaps.push(t);});}catch(e){addLog(`Losers: ${e.message}`,"warn");}
+      }
+
+      addLog(`Total: ${snaps.length} tickers`);
+      if(!snaps.length) throw new Error("NO_DATA");
+
+      const candidates=snaps.map(t=>{
+        const price=t.day?.close||t.lastTrade?.p||t.prevDay?.c||0;
+        const vol=t.day?.volume||t.prevDay?.v||0;
+        const chg=t.todaysChangePerc||0;
+        return{ticker:t.ticker,price,vol,chg:+chg.toFixed(2),volRatio:t.prevDay?.v>0?+(vol/t.prevDay.v).toFixed(2):1,hi:t.day?.high||price,lo:t.day?.low||price,vwap:t.day?.vwap||price};
+      }).filter(c=>c.price>=3&&c.vol>=1000).sort((a,b)=>Math.abs(b.chg)-Math.abs(a.chg)).slice(0,25);
+
+      addLog(`Candidates: ${candidates.length}`,candidates.length>0?"ok":"error");
+      if(!candidates.length) throw new Error("NO_CANDIDATES");
+
+      for(let i=0;i<candidates.length;i++){
+        if(abort.current)break;
+        const c=candidates[i];
+        setStage(`[${i+1}/${candidates.length}] ${c.ticker}`);setPct(20+Math.round((i/candidates.length)*75));
+        let opts=null;
+        try{opts=await fetchOptions(c.ticker,days);addLog(`  ${c.ticker}: opts ${opts?`✓ ${fmtV(opts.totalVol)}`:"—"}`,"ok");}
+        catch(e){addLog(`  ${c.ticker}: opts err`,"warn");}
+        await sleep(180);
+        try{
+          const ai=await aiAnalyze({...c,sector:SECTORS[c.ticker]||"Equity",optVol:opts?.totalVol,callVol:opts?.callVol,putVol:opts?.putVol,pcr:opts?.pcr,iv:opts?.iv,delta:opts?.delta,instBias:opts?.instBias,unusualCalls:opts?.unusualCalls??0,unusualPuts:opts?.unusualPuts??0},dteLabel);
+          addLog(`  ${c.ticker}: ${ai.signal} ${ai.grade} ${ai.profitProbability}%`,"ok");
+          if(ai.signal&&ai.grade!=="C"){
+            setStocks(p=>[...p.filter(s=>s.ticker!==c.ticker),{...c,...ai,sector:SECTORS[c.ticker]||"Equity",optVol:opts?.totalVol,pcr:opts?.pcr,iv:opts?.iv,instBias:opts?.instBias,unusualCalls:opts?.unusualCalls??0,unusualPuts:opts?.unusualPuts??0,bigBlock:opts?.bigBlock,afterHours:!isOpen}].sort((a,b)=>(a.grade||"Z").localeCompare(b.grade||"Z")));
+          }
+        }catch(e){addLog(`  ${c.ticker}: AI err — ${e.message}`,"error");}
+      }
+      setLastScan(new Date());setPct(100);setStage("");addLog("✓ Done","ok");
+    }catch(e){
+      addLog(`FATAL: ${e.message}`,"error");setShowLog(true);
+      setErr(e.message==="NO_DATA"||e.message==="NO_CANDIDATES"?"⚠ No data returned. Check 🐛 log.":"⚠ "+e.message);
+    }
+    setLoading(false);setPct(0);
+  },[]);
+
+  React.useEffect(()=>{runScan(dte);},[]);
+  React.useEffect(()=>{
+    const t=setInterval(()=>{if(!loading)runScan(dte);},5*60*1000);
+    return()=>clearInterval(t);
+  },[dte,loading,runScan]);
+
+  const filtered=stocks.filter(s=>filter==="ALL"||s.signal===filter).sort((a,b)=>{
+    if(sort==="grade")return(a.grade||"Z").localeCompare(b.grade||"Z");
+    if(sort==="conf") return(b.confidence||0)-(a.confidence||0);
+    if(sort==="prob") return(b.profitProbability||0)-(a.profitProbability||0);
+    if(sort==="move") return Math.abs(b.chg||0)-Math.abs(a.chg||0);
+    return 0;
+  });
+  const top3=[...stocks].sort((a,b)=>((b.confidence||0)*.5+(b.profitProbability||0)*.3+(b.grade==="A"?20:0))-((a.confidence||0)*.5+(a.profitProbability||0)*.3+(a.grade==="A"?20:0))).slice(0,3);
+  const calls=stocks.filter(s=>s.signal==="CALL").length;
+  const puts=stocks.filter(s=>s.signal==="PUT").length;
+
+  return(
+    <div style={{minHeight:"100vh",background:"#070b12",fontFamily:"'Courier New',monospace",color:"#e2e8f0"}}>
+      {/* TOPBAR */}
+      <div style={{background:"#050810",borderBottom:"1px solid #1a2f4e",padding:"10px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:22,fontWeight:900,letterSpacing:4,color:"#38bdf8"}}>OPTICA</span>
+          <span style={{fontSize:9,color:"#475569",letterSpacing:1}}>LIVE OPTIONS SCREENER</span>
+          <span style={{width:7,height:7,borderRadius:"50%",background:afterHours?"#f59e0b":"#22c55e",display:"inline-block"}}/>
+          <span style={{fontSize:9,color:afterHours?"#f59e0b":"#22c55e"}}>{afterHours?"AFTER HOURS":"MARKET OPEN"}</span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:7}}>
+          {lastScan&&<span style={{fontSize:9,color:"#334155"}}>{lastScan.toLocaleTimeString()}</span>}
+          <button onClick={()=>setShowLog(v=>!v)} style={{background:"transparent",border:"1px solid #1e3a5f",color:showLog?"#60a5fa":"#94a3b8",padding:"4px 10px",fontSize:10,cursor:"pointer",borderRadius:3}}>🐛 LOG</button>
+          <span style={{width:6,height:6,borderRadius:"50%",background:loading?"#f59e0b":"#22c55e",display:"inline-block"}}/>
+          <button onClick={()=>{abort.current=false;runScan(dte);}} disabled={loading}
+            style={{background:"linear-gradient(135deg,#1d4ed8,#2563eb)",border:"none",color:"#fff",padding:"7px 14px",fontSize:11,fontWeight:700,cursor:"pointer",borderRadius:4,opacity:loading?.5:1}}>
+            {loading?"⟳ SCANNING…":"⟳ REFRESH"}
+          </button>
+        </div>
+      </div>
+
+      {loading&&<div style={{background:"#050810",borderBottom:"1px solid #1a2f4e"}}>
+        <div style={{height:2,background:"#1e3a5f"}}><div style={{height:"100%",background:"linear-gradient(90deg,#3b82f6,#38bdf8)",width:`${pct}%`,transition:"width .4s"}}/></div>
+        <div style={{padding:"5px 16px",fontSize:9,color:"#38bdf8"}}>{stage}</div>
+      </div>}
+
+      {showLog&&<div style={{background:"#020408",borderBottom:"1px solid #1a2f4e",padding:"7px 16px",maxHeight:140,overflowY:"auto",fontSize:9}}>
+        {log.map((l,i)=><div key={i} style={{color:l.type==="error"?"#f87171":l.type==="warn"?"#fbbf24":l.type==="ok"?"#22c55e":"#475569",lineHeight:1.6}}><span style={{color:"#334155",marginRight:8}}>{l.ts}</span>{l.msg}</div>)}
+      </div>}
+
+      <div style={{padding:"12px 16px",maxWidth:1600,margin:"0 auto"}}>
+        {/* DTE */}
+        <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+          {[{k:"5",l:"2–5 Days",c:"#f87171"},{k:"7",l:"1 Week",c:"#fbbf24"},{k:"14",l:"2 Weeks",c:"#22c55e"}].map(o=>(
+            <button key={o.k} onClick={()=>{setDte(o.k);runScan(o.k);}}
+              style={{border:`1px solid ${dte===o.k?o.c:"#1e3a5f"}`,background:dte===o.k?o.c+"12":"transparent",color:dte===o.k?o.c:"#64748b",padding:"7px 14px",fontSize:11,cursor:"pointer",borderRadius:5,fontWeight:dte===o.k?700:400}}>
+              {o.l}
+            </button>
+          ))}
+        </div>
+
+        {/* STATS */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(80px,1fr))",gap:7,marginBottom:10}}>
+          {[{l:"SETUPS",v:stocks.length||"—",c:"#818cf8"},{l:"CALLS",v:calls||"—",c:"#22c55e"},{l:"PUTS",v:puts||"—",c:"#f87171"},{l:"TARGET",v:"5%",c:"#a78bfa"},{l:"SESSION",v:afterHours?"PREV":"LIVE",c:afterHours?"#f59e0b":"#22c55e"}].map((s,i)=>(
+            <div key={i} style={{background:"#0d1626",border:"1px solid #1a2f4e",borderRadius:6,padding:"8px 10px"}}>
+              <div style={{fontSize:7,color:"#334155",letterSpacing:1,marginBottom:2}}>{s.l}</div>
+              <div style={{fontSize:18,fontWeight:700,color:s.c}}>{s.v}</div>
+            </div>
+          ))}
+        </div>
+
+        {err&&<div style={{background:"rgba(239,68,68,.08)",border:"1px solid rgba(239,68,68,.2)",borderRadius:6,padding:"10px 14px",marginBottom:10,fontSize:10,color:"#fca5a5"}}>{err}</div>}
+
+        {/* TOP 3 */}
+        {top3.length>0&&<div style={{marginBottom:10}}>
+          <div style={{fontSize:8,color:"#334155",letterSpacing:1,marginBottom:7}}>★ TOP 3 RECOMMENDATIONS</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {top3.map((s,rank)=>{
+              const sc=s.signal==="CALL"?"#22c55e":"#f87171";
+              return<div key={s.ticker} onClick={()=>setSel(s)} style={{flex:1,minWidth:150,background:"#0d1626",border:`1px solid ${rank===0?"#fbbf24":"#1e3a5f"}`,borderRadius:8,padding:12,cursor:"pointer",position:"relative",overflow:"hidden"}}>
+                {rank===0&&<div style={{position:"absolute",top:0,left:0,right:0,height:2,background:"linear-gradient(90deg,#fbbf24,#f59e0b)"}}/>}
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:7}}>
+                  <span style={{fontSize:18,fontWeight:900,color:"#e2e8f0"}}>{"🥇🥈🥉"[rank]} {s.ticker}</span>
+                  <span style={{background:sc+"15",border:`1px solid ${sc}35`,borderRadius:3,padding:"2px 7px",fontSize:8,fontWeight:700,color:sc}}>{s.signal==="CALL"?"▲":"▼"} {s.signal}</span>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:7}}>
+                  <div><div style={{fontSize:7,color:"#334155"}}>PRICE</div><div style={{fontSize:13,fontWeight:800,color:"#e2e8f0"}}>{fmtP(s.price)}</div></div>
+                  <div><div style={{fontSize:7,color:"#334155"}}>PROB</div><div style={{fontSize:13,fontWeight:800,color:s.profitProbability>=60?"#22c55e":"#fbbf24"}}>{s.profitProbability}%</div></div>
+                  <div><div style={{fontSize:7,color:"#334155"}}>ENTRY</div><div style={{fontSize:13,fontWeight:800,color:"#e2e8f0"}}>{fmtP(s.targetPremium)}</div></div>
+                  <div><div style={{fontSize:7,color:"#334155"}}>TARGET</div><div style={{fontSize:13,fontWeight:800,color:"#22c55e"}}>{fmtP(s.target5pct)}</div></div>
+                </div>
+                <div style={{fontSize:7,color:"#475569",lineHeight:1.5}}>{s.catalyst?.slice(0,80)}…</div>
+              </div>;
+            })}
+          </div>
+        </div>}
+
+        {/* FILTER */}
+        <div style={{display:"flex",gap:5,marginBottom:8,alignItems:"center"}}>
+          {["ALL","CALL","PUT"].map(f=>(
+            <button key={f} onClick={()=>setFilter(f)}
+              style={{border:"1px solid",borderColor:filter===f?"#3b82f6":"#1e3a5f",background:filter===f?"rgba(59,130,246,.12)":"transparent",color:filter===f?"#60a5fa":"#94a3b8",padding:"4px 11px",fontSize:10,cursor:"pointer",borderRadius:3}}>
+              {f==="CALL"?"▲ ":f==="PUT"?"▼ ":""}{f}
+            </button>
+          ))}
+          <span style={{fontSize:8,color:"#334155",marginLeft:4}}>{filtered.length} setups</span>
+          <div style={{marginLeft:"auto",display:"flex",gap:3,fontSize:10,color:"#334155"}}>
+            SORT: {[["grade","GRD"],["conf","CONF"],["prob","PROB"],["move","MOVE"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setSort(k)} style={{background:"transparent",border:"none",color:sort===k?"#60a5fa":"#64748b",cursor:"pointer",fontSize:10}}>{l}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* TABLE */}
+        <div style={{background:"#0d1626",border:"1px solid #1a2f4e",borderRadius:8,overflow:"hidden"}}>
+          {stocks.length===0&&!loading&&!err&&<div style={{padding:40,textAlign:"center",color:"#334155",fontSize:11}}>Scanning live markets…</div>}
+          {(stocks.length>0||loading)&&<div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+              <thead><tr style={{background:"#060a12",borderBottom:"1px solid #1a2f4e"}}>
+                {["TICKER","SIG","PRICE","CHG%","OPT VOL","P/C","IV","INST","STRATEGY","STRIKE","EXPIRY","ENTRY","TARGET","STOP","PROB","R/R","GRD"].map(h=>(
+                  <th key={h} style={{padding:"8px 8px",textAlign:"left",fontSize:8,color:"#334155",letterSpacing:1,whiteSpace:"nowrap"}}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {loading&&stocks.length===0&&<tr><td colSpan={17} style={{padding:40,textAlign:"center"}}>
+                  <div style={{fontSize:9,color:"#334155"}}>⟳ Fetching live data…</div>
+                </td></tr>}
+                {filtered.map((s,i)=>{
+                  const isBull=s.signal==="CALL";const sc=isBull?"#22c55e":"#f87171";
+                  const gc=s.grade==="A"?"#fbbf24":s.grade==="B"?"#60a5fa":"#64748b";
+                  const pc=(s.profitProbability||0)>=60?"#22c55e":(s.profitProbability||0)>=45?"#fbbf24":"#f87171";
+                  return<tr key={s.ticker} onClick={()=>setSel(sel?.ticker===s.ticker?null:s)}
+                    style={{borderBottom:"1px solid rgba(26,47,78,.5)",background:sel?.ticker===s.ticker?"rgba(56,120,200,.18)":i%2===0?"transparent":"rgba(255,255,255,.01)",cursor:"pointer"}}>
+                    <td style={{padding:"7px 8px",fontWeight:700,color:"#e2e8f0",fontSize:12}}>{s.ticker}<div style={{fontSize:7,color:"#334155"}}>{s.sector}</div></td>
+                    <td style={{padding:"7px 8px"}}><span style={{background:sc+"13",border:`1px solid ${sc}32`,borderRadius:3,padding:"2px 5px",fontSize:8,fontWeight:700,color:sc}}>{isBull?"▲":"▼"} {s.signal}</span></td>
+                    <td style={{padding:"7px 8px",color:"#e2e8f0",fontWeight:600}}>{fmtP(s.price)}</td>
+                    <td style={{padding:"7px 8px",color:s.chg>0?"#22c55e":"#f87171",fontWeight:600}}>{s.chg>0?"+":""}{fmt(s.chg)}%</td>
+                    <td style={{padding:"7px 8px",color:"#64748b",fontSize:10}}>{s.optVol?fmtV(s.optVol):"—"}</td>
+                    <td style={{padding:"7px 8px",color:s.pcr&&s.pcr<.7?"#22c55e":s.pcr>1.2?"#f87171":"#94a3b8",fontSize:10}}>{fmt(s.pcr)}</td>
+                    <td style={{padding:"7px 8px",color:s.iv>50?"#fbbf24":"#64748b",fontSize:10}}>{s.iv?`${s.iv}%`:"—"}</td>
+                    <td style={{padding:"7px 8px"}}>{s.instBias?<span style={{fontSize:7,fontWeight:700,color:s.instBias==="CALL"?"#22c55e":"#f87171"}}>{s.instBias==="CALL"?"▲":"▼"} {s.instBias}</span>:<span style={{color:"#334155"}}>—</span>}</td>
+                    <td style={{padding:"7px 8px",color:"#a0aec0",fontSize:9,whiteSpace:"nowrap"}}>{s.strategy||"—"}</td>
+                    <td style={{padding:"7px 8px",color:"#e2e8f0",fontWeight:600}}>{s.strike?`$${s.strike}`:"—"}</td>
+                    <td style={{padding:"7px 8px",color:"#a78bfa",fontSize:8,whiteSpace:"nowrap"}}>{s.expiry||"—"}</td>
+                    <td style={{padding:"7px 8px",color:"#e2e8f0",fontWeight:600}}>{fmtP(s.targetPremium)}</td>
+                    <td style={{padding:"7px 8px",color:"#22c55e",fontWeight:700}}>{fmtP(s.target5pct)}</td>
+                    <td style={{padding:"7px 8px",color:"#f87171"}}>{fmtP(s.stopLoss)}</td>
+                    <td style={{padding:"7px 8px"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:4}}>
+                        <div style={{width:30,height:4,background:"#1e3a5f",borderRadius:2,overflow:"hidden"}}><div style={{width:`${s.profitProbability||0}%`,height:"100%",background:pc}}/></div>
+                        <span style={{fontSize:9,fontWeight:700,color:pc}}>{s.profitProbability}%</span>
+                      </div>
+                    </td>
+                    <td style={{padding:"7px 8px",color:"#a78bfa",fontSize:10}}>{s.riskReward?`${fmt(s.riskReward,1)}x`:"—"}</td>
+                    <td style={{padding:"7px 8px"}}><div style={{width:20,height:20,borderRadius:"50%",background:gc+"18",border:`1.5px solid ${gc}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:800,color:gc}}>{s.grade||"—"}</div></td>
+                  </tr>;
+                })}
+              </tbody>
+            </table>
+          </div>}
+        </div>
+
+        {sel&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.87)",backdropFilter:"blur(6px)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={()=>setSel(null)}>
+          <div style={{background:"#0d1626",border:"1px solid #1e3a5f",borderRadius:10,width:580,maxWidth:"96vw",maxHeight:"90vh",overflow:"auto"}} onClick={e=>e.stopPropagation()}>
+            <div style={{background:"#060a12",borderBottom:"1px solid #1e3a5f",padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:22,fontWeight:900,color:"#e2e8f0",letterSpacing:2}}>{sel.ticker} <span style={{fontSize:11,color:"#475569",fontWeight:400}}>{sel.sector}</span></span>
+              <button onClick={()=>setSel(null)} style={{background:"transparent",border:"none",color:"#475569",fontSize:18,cursor:"pointer"}}>✕</button>
+            </div>
+            <div style={{padding:16}}>
+              <div style={{background:sel.signal==="CALL"?"rgba(34,197,94,.06)":"rgba(248,113,113,.06)",border:`1px solid ${sel.signal==="CALL"?"#22c55e":"#f87171"}30`,borderRadius:6,padding:"10px 13px",marginBottom:10,display:"flex",justifyContent:"space-between"}}>
+                <div><div style={{fontSize:8,color:"#64748b"}}>SIGNAL</div><div style={{fontSize:20,fontWeight:900,color:sel.signal==="CALL"?"#22c55e":"#f87171"}}>{sel.signal==="CALL"?"▲ ":"▼ "}{sel.signal}</div></div>
+                <div><div style={{fontSize:8,color:"#64748b"}}>STRATEGY</div><div style={{fontSize:12,fontWeight:600,color:"#a78bfa"}}>{sel.strategy}</div></div>
+                <div><div style={{fontSize:8,color:"#64748b"}}>EXPIRY</div><div style={{fontSize:12,color:"#e2e8f0"}}>{sel.expiry}</div></div>
+              </div>
+              <div style={{background:"#0a1120",border:"1px solid #1e3a5f",borderRadius:6,padding:"12px 14px",marginBottom:10}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                  <span style={{fontSize:9,color:"#64748b"}}>PROFIT PROBABILITY</span>
+                  <span style={{fontSize:18,fontWeight:800,color:sel.profitProbability>=60?"#22c55e":sel.profitProbability>=45?"#fbbf24":"#f87171"}}>{sel.profitProbability}%</span>
+                </div>
+                <div style={{width:"100%",height:7,background:"#1e3a5f",borderRadius:3,overflow:"hidden"}}>
+                  <div style={{width:`${sel.profitProbability}%`,height:"100%",background:sel.profitProbability>=60?"#22c55e":sel.profitProbability>=45?"#fbbf24":"#f87171"}}/>
+                </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:10}}>
+                {[{l:"STRIKE",v:sel.strike?`$${sel.strike}`:"—",c:"#e2e8f0"},{l:"ENTRY",v:fmtP(sel.targetPremium),c:"#e2e8f0"},{l:"TARGET +5%",v:fmtP(sel.target5pct),c:"#22c55e"},{l:"STOP -20%",v:fmtP(sel.stopLoss),c:"#f87171"}].map((x,i)=>(
+                  <div key={i} style={{textAlign:"center",background:"#060a12",borderRadius:4,padding:"8px 5px"}}>
+                    <div style={{fontSize:7,color:"#475569",marginBottom:3}}>{x.l}</div>
+                    <div style={{fontSize:14,fontWeight:800,color:x.c}}>{x.v}</div>
+                  </div>
+                ))}
+              </div>
+              {sel.instBias&&<div style={{background:"rgba(167,139,250,.05)",border:"1px solid rgba(167,139,250,.18)",borderRadius:6,padding:"10px 13px",marginBottom:10}}>
+                <div style={{fontSize:8,color:"#a78bfa",marginBottom:5}}>🏦 INSTITUTIONAL FLOW</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
+                  {[{l:"BIAS",v:sel.instBias,c:sel.instBias==="CALL"?"#22c55e":"#f87171"},{l:"UNUSUAL CALLS",v:sel.unusualCalls,c:"#22c55e"},{l:"UNUSUAL PUTS",v:sel.unusualPuts,c:"#f87171"}].map((x,i)=>(
+                    <div key={i} style={{textAlign:"center",background:"#060a12",borderRadius:4,padding:"7px 5px"}}>
+                      <div style={{fontSize:7,color:"#475569",marginBottom:2}}>{x.l}</div>
+                      <div style={{fontSize:13,fontWeight:800,color:x.c}}>{x.v}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>}
+              <div style={{background:"rgba(56,189,248,.04)",border:"1px solid rgba(56,189,248,.14)",borderRadius:5,padding:"9px 12px"}}>
+                <div style={{fontSize:8,color:"#38bdf8",marginBottom:4}}>AI CATALYST</div>
+                <div style={{fontSize:10,color:"#cbd5e1",lineHeight:1.7}}>{sel.catalyst}</div>
+              </div>
+            </div>
+          </div>
+        </div>}
+
+        <div style={{marginTop:8,fontSize:7,color:"#1e3a5f",textAlign:"center"}}>
+          Polygon.io live data · AI: Claude Sonnet · ⚠ Educational only — not financial advice
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
